@@ -1,73 +1,103 @@
 #!/bin/bash
 
-# reset shell colors
+# --- Inicialização ---
 tput init
+TIMESTAMP=$(date +%F_%T)
+LOG_DIR="/home/logs_instalacao"
+mkdir -p "$LOG_DIR"
 
-# https://stackoverflow.com/questions/59895/how-to-get-the-source-directory-of-a-bash-script-from-within-the-script-itself
-SOURCE="${BASH_SOURCE[0]}"
-while [ -h "$SOURCE" ]; do # resolve $SOURCE until the file is no longer a symlink
-  PROJECT_ROOT="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
-  SOURCE="$(readlink "$SOURCE")"
-  [[ $SOURCE != /* ]] && SOURCE="$PROJECT_ROOT/$SOURCE" # if $SOURCE was a relative symlink, we need to resolve it relative to the path where the symlink file was located
-done
-PROJECT_ROOT="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+PROJECT_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 
-# required imports
-source "${PROJECT_ROOT}"/variables/manifest.sh
-source "${PROJECT_ROOT}"/utils/manifest.sh
-source "${PROJECT_ROOT}"/lib/manifest.sh
+echo "[$TIMESTAMP] Iniciando instalação..." | tee -a "$LOG_DIR/install_master.log"
 
-# user configs file
-if [[ ! -e "${PROJECT_ROOT}"/config ]]; then
-  cat << EOF > "${PROJECT_ROOT}"/config
+# --- Função de verificação de erro ---
+check_exit() {
+    if [ $1 -ne 0 ]; then
+        echo "ERRO: $2" | tee -a "$LOG_DIR/install_master.log"
+        exit 1
+    fi
+}
+
+# --- Corrigir apt quebrado ---
+echo "[$TIMESTAMP] Verificando apt..." | tee -a "$LOG_DIR/install_master.log"
+sudo dpkg --configure -a &> "$LOG_DIR/apt_fix_$TIMESTAMP.log"
+check_exit $? "Falha ao corrigir dpkg."
+
+sudo apt-get update &> "$LOG_DIR/apt_update_$TIMESTAMP.log"
+check_exit $? "Falha no apt-get update."
+sudo apt-get upgrade -y &> "$LOG_DIR/apt_upgrade_$TIMESTAMP.log"
+check_exit $? "Falha no apt-get upgrade."
+
+# --- Instalar git ---
+echo "[$TIMESTAMP] Instalando git..." | tee -a "$LOG_DIR/install_master.log"
+sudo apt install -y git &> "$LOG_DIR/git_install_$TIMESTAMP.log"
+check_exit $? "Falha ao instalar git."
+
+# --- Verificar Node.js ---
+if ! command -v node &> /dev/null; then
+    echo "[$TIMESTAMP] Instalando Node.js LTS..." | tee -a "$LOG_DIR/install_master.log"
+    curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - &> "$LOG_DIR/node_setup_$TIMESTAMP.log"
+    check_exit $? "Falha no setup Node.js."
+    sudo apt install -y nodejs &> "$LOG_DIR/node_install_$TIMESTAMP.log"
+    check_exit $? "Falha ao instalar Node.js."
+fi
+
+# --- Instalar PM2 global ---
+echo "[$TIMESTAMP] Instalando PM2..." | tee -a "$LOG_DIR/install_master.log"
+sudo npm install -g pm2 &> "$LOG_DIR/pm2_install_$TIMESTAMP.log"
+check_exit $? "Falha ao instalar PM2."
+
+# --- Instalar Redis ---
+echo "[$TIMESTAMP] Instalando Redis..." | tee -a "$LOG_DIR/install_master.log"
+sudo apt install -y redis-server &> "$LOG_DIR/redis_install_$TIMESTAMP.log"
+check_exit $? "Falha ao instalar Redis."
+
+# --- Criar pasta de configuração se não existir ---
+if [[ ! -e "${PROJECT_ROOT}/config" ]]; then
+cat << EOF > "${PROJECT_ROOT}/config"
 deploy_password=${deploy_password}
 mysql_root_password=${mysql_root_password}
 db_pass=${db_pass}
 EOF
+    sudo chown root:root "${PROJECT_ROOT}/config"
+    sudo chmod 700 "${PROJECT_ROOT}/config"
+fi
+source "${PROJECT_ROOT}/config"
+
+# --- Clone repositórios ---
+echo "[$TIMESTAMP] Clonando repositórios..." | tee -a "$LOG_DIR/install_master.log"
+if [[ ! -d "${PROJECT_ROOT}/frontend" ]]; then
+    git clone https://github.com/lft-mariano/frontend.git "${PROJECT_ROOT}/frontend" &> "$LOG_DIR/frontend_clone_$TIMESTAMP.log"
+    check_exit $? "Falha ao clonar frontend."
+fi
+if [[ ! -d "${PROJECT_ROOT}/backend" ]]; then
+    git clone https://github.com/lft-mariano/backend.git "${PROJECT_ROOT}/backend" &> "$LOG_DIR/backend_clone_$TIMESTAMP.log"
+    check_exit $? "Falha ao clonar backend."
 fi
 
-# this file has passwords
-sudo su - root <<EOF
-chown root:root "${PROJECT_ROOT}"/config
-chmod 700 "${PROJECT_ROOT}"/config
-EOF
-source "${PROJECT_ROOT}"/config
+# --- Build Backend ---
+echo "[$TIMESTAMP] Instalando dependências backend..." | tee -a "$LOG_DIR/install_master.log"
+cd "${PROJECT_ROOT}/backend"
+npm install &> "$LOG_DIR/backend_npm_$TIMESTAMP.log"
+check_exit $? "Falha no npm install backend."
 
-# interactive CLI
-inquiry_options
+echo "[$TIMESTAMP] Build backend..." | tee -a "$LOG_DIR/install_master.log"
+npm run build &> "$LOG_DIR/backend_build_$TIMESTAMP.log"
+check_exit $? "Falha no build backend."
 
-# dependencies related
-system_update
-system_node_install
-system_pm2_install
-system_docker_install
-system_puppeteer_dependencies
-system_snapd_install
-system_nginx_install
-system_certbot_install
+pm2 restart all &> "$LOG_DIR/backend_pm2_$TIMESTAMP.log"
 
-# system config
-system_create_user
+# --- Build Frontend ---
+echo "[$TIMESTAMP] Instalando dependências frontend..." | tee -a "$LOG_DIR/install_master.log"
+cd "${PROJECT_ROOT}/frontend"
+npm install &> "$LOG_DIR/frontend_npm_$TIMESTAMP.log"
+check_exit $? "Falha no npm install frontend."
 
-# backend related
-system_git_clone
-backend_set_env
-backend_redis_create
-backend_node_dependencies
-backend_node_build
-backend_db_migrate
-backend_db_seed
-backend_start_pm2
-backend_nginx_setup
+echo "[$TIMESTAMP] Build frontend..." | tee -a "$LOG_DIR/install_master.log"
+npm run build &> "$LOG_DIR/frontend_build_$TIMESTAMP.log"
+check_exit $? "Falha no build frontend."
 
-# frontend related
-frontend_set_env
-frontend_node_dependencies
-frontend_node_build
-frontend_start_pm2
-frontend_nginx_setup
+pm2 restart all &> "$LOG_DIR/frontend_pm2_$TIMESTAMP.log"
 
-# network related
-system_nginx_conf
-system_nginx_restart
-system_certbot_setup
+# --- Finalização ---
+echo "[$TIMESTAMP] Instalação concluída com sucesso!" | tee -a "$LOG_DIR/install_master.log"
